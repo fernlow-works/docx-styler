@@ -20,8 +20,9 @@ The free features never use the network and never stop working.
 
 Pro adds:
 
-- **Your own Word template.** Point Docx Styler at a .docx in your vault and every export uses its styles (fonts, colors, spacing, heading looks).
+- **Your own Word template.** Point Docx Styler at a .docx in your vault and every export, single note or compiled folder, uses its styles (fonts, colors, spacing, heading looks).
 - **Page numbers** in the footer.
+- **Compile a folder into one Word file.** Run **Compile a folder into one Word file (Pro)** from the command palette, or right-click a folder and choose **Compile to one Word file (.docx)**. Every note in the folder and its subfolders is joined in natural name order (Chapter 2 comes before Chapter 10) and saved as one .docx. Each note name becomes a Heading 1 chapter on a new page, headings inside a note move down one level, and your Word template and page numbers apply to the whole file. Properties and comments are left out, as in a single export.
 
 Price: 19 USD, one-time. Use your key on up to 5 devices.
 

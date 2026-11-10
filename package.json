@@ -1,6 +1,6 @@
 {
 	"name": "docx-styler",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "Export notes to Word (.docx) with real Word styles, on desktop and mobile, without Pandoc.",
 	"main": "main.js",
 	"type": "module",

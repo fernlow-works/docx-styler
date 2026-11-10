@@ -7,3 +7,4 @@ export class Setting {}
 export class Notice {}
 export class TFile {}
 export const requireApiVersion = (): boolean => true;
+export class TFolder {}

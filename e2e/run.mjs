@@ -50,7 +50,7 @@ function prepareVault() {
 	const pluginDir = path.join(VAULT, ".obsidian", "plugins", PLUGIN_ID);
 	fs.mkdirSync(pluginDir, { recursive: true });
 	for (const f of ["main.js", "manifest.json", "styles.css"]) fs.copyFileSync(path.join(REPO, f), path.join(pluginDir, f));
-	for (const f of fs.readdirSync(path.join(REPO, "e2e", "fixtures"))) fs.copyFileSync(path.join(REPO, "e2e", "fixtures", f), path.join(VAULT, f));
+	fs.cpSync(path.join(REPO, "e2e", "fixtures"), VAULT, { recursive: true });
 	const cfg = path.join(HOME, ".config", "obsidian");
 	fs.mkdirSync(cfg, { recursive: true });
 	fs.writeFileSync(
@@ -206,7 +206,7 @@ async function main() {
 		}, PLUGIN_ID);
 		await sleep(500);
 		const enabled = await snapshot(page, cdp);
-		check("Plugin enables", enabled.loaded && enabled.commands === 1 && enabled.ribbonItems === 1 && enabled.settingTabs === 1, JSON.stringify({ commands: enabled.commands, ribbon: enabled.ribbonItems, tabs: enabled.settingTabs }));
+		check("Plugin enables", enabled.loaded && enabled.commands === 2 && enabled.ribbonItems === 1 && enabled.settingTabs === 1, JSON.stringify({ commands: enabled.commands, ribbon: enabled.ribbonItems, tabs: enabled.settingTabs }));
 
 		// Settings tab renders through the 1.13+ declarative API and is searchable.
 		const settings = await page.evaluate(async (id) => {
@@ -292,6 +292,82 @@ async function main() {
 		const gatedNotice = await page.evaluate(() => [...document.querySelectorAll(".notice")].some((n) => n.textContent.includes("Pro features")));
 		const footer = file ? spawnSync("unzip", ["-p", file, "word/footer1.xml"], { encoding: "utf8" }).stdout : "";
 		check("Page numbers stay off without Pro and a notice explains it", file && gatedNotice && !footer.includes("PAGE"));
+		// 4. Folder compile (Pro). Gated first, then unlocked the way a verified key would, without the network.
+		await page.evaluate(async (id) => {
+			const tab = app.setting.pluginTabs.find((t) => t.id === id);
+			await tab.setControlValue("pageNumbers", false);
+			app.setting.close();
+		}, PLUGIN_ID);
+		await waitNoticesGone(page);
+		await page.evaluate((id) => app.commands.executeCommandById(`${id}:compile-folder`), PLUGIN_ID);
+		await sleep(500);
+		const gate = await page.evaluate(() => ({
+			notice: [...document.querySelectorAll(".notice")].some((n) => n.textContent.includes("Compiling a folder is a Pro feature")),
+			modal: Boolean(document.querySelector(".prompt")),
+		}));
+		check("Folder compile is gated without Pro (notice, no folder picker)", gate.notice && !gate.modal);
+		await waitNoticesGone(page);
+
+		const compiled = "Exports/Book.docx";
+		fs.rmSync(path.join(VAULT, compiled), { force: true });
+		fs.mkdirSync(path.join(VAULT, "Templates"), { recursive: true });
+		fs.copyFileSync(path.join(VAULT, OUT), path.join(VAULT, "Templates", "House style.docx"));
+		await page.evaluate(async (id) => {
+			const plugin = app.plugins.plugins[id];
+			plugin.settings.license = { status: "active", uses: 1, checkedAt: Date.now() };
+			plugin.settings.templatePath = "Templates/House style.docx";
+			plugin.settings.pageNumbers = true;
+			await plugin.saveSettings();
+		}, PLUGIN_ID);
+		t0 = Date.now();
+		await page.evaluate((id) => app.commands.executeCommandById(`${id}:compile-folder`), PLUGIN_ID);
+		const picker = page.locator(".prompt-input");
+		await picker.waitFor({ timeout: 5000 });
+		await picker.fill("Book");
+		await sleep(400);
+		const firstSuggestion = await page.locator(".suggestion-item").first().textContent();
+		await page.keyboard.press("Enter");
+		file = await waitForFile(compiled, t0);
+		check("Command 'Compile a folder into one Word file (Pro)' picks a folder and writes one file", file && firstSuggestion === "Book", `${compiled}, first suggestion ${firstSuggestion}`);
+		if (file) {
+			const keep = path.join(RESULTS, "folder-command.docx");
+			fs.copyFileSync(file, keep);
+			const py = spawnSync("python3", [path.join(REPO, "e2e", "verify_manuscript.py"), keep], { encoding: "utf8" });
+			let parsed = null;
+			try {
+				parsed = JSON.parse(py.stdout);
+			} catch {
+				/* reported below */
+			}
+			const bad = parsed ? Object.entries(parsed.checks).filter(([, v]) => !v).map(([k]) => k) : ["unparsable"];
+			check("folder-command: chapter order, heading styles, footnotes and page numbers", py.status === 0, bad.length ? `failed: ${bad.join(", ")} ${py.stderr}` : `${Object.keys(parsed.checks).length} checks`);
+			const lo = spawnSync("soffice", ["--headless", `-env:UserInstallation=file://${path.join(RUN, "lo-profile")}`, "--convert-to", "pdf", "--outdir", RESULTS, keep], { encoding: "utf8", timeout: 120000 });
+			const pdf = keep.replace(/\.docx$/, ".pdf");
+			const text = fs.existsSync(pdf) ? spawnSync("pdftotext", [pdf, "-"], { encoding: "utf8" }).stdout : "";
+			const order = ["Chapter 1", "Chapter 2", "Chapter 10", "Appendix text"].map((t) => text.indexOf(t));
+			check("folder-command: LibreOffice opens it and chapters appear in order", lo.status === 0 && order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])), order.join(","));
+		}
+
+		// Folder right-click menu
+		fs.rmSync(path.join(VAULT, compiled));
+		await sleep(500);
+		t0 = Date.now();
+		await page.click('.nav-folder-title[data-path="Book"]', { button: "right" });
+		await page.click('.menu-item:has-text("Compile to one Word file (.docx)")');
+		file = await waitForFile(compiled, t0);
+		check("Folder menu item writes the compiled file", file, compiled);
+		if (file) fs.copyFileSync(file, path.join(RESULTS, "folder-menu.docx"));
+		await waitNoticesGone(page);
+		await page.evaluate(async (id) => {
+			const plugin = app.plugins.plugins[id];
+			plugin.settings.license = null;
+			plugin.settings.templatePath = "";
+			plugin.settings.pageNumbers = false;
+			await plugin.saveSettings();
+			const t = app.vault.getFolderByPath("Templates");
+			if (t) await app.vault.delete(t, true);
+		}, PLUGIN_ID);
+
 		check("No network requests from the plugin", net.length === 0, net.join(" "));
 
 		// Disable and compare with the state before enabling

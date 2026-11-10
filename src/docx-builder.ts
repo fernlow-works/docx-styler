@@ -70,7 +70,17 @@ function decodeEntities(s: string): string {
 		.replace(/&amp;/g, "&");
 }
 
+/** One note of a compiled manuscript. */
+export interface ManuscriptNote {
+	/** Chapter title, shown as Heading 1. */
+	title: string;
+	prepared: Prepared;
+	assets: Assets;
+}
+
 class Builder {
+	private noteIndex = 0;
+	private headingShift = 0;
 	private footnoteNumbers = new Map<string, number>();
 	private footnoteBodies: Record<string, { children: Paragraph[] }> = {};
 	private listInstance = 0;
@@ -80,6 +90,14 @@ class Builder {
 		private opts: BuildOptions,
 		private assets: Assets,
 	) {}
+
+	/** Switches to the next note. Footnote ids only count inside their own note. */
+	private useNote(index: number, prepared: Prepared, assets: Assets, headingShift: number): void {
+		this.noteIndex = index;
+		this.prepared = prepared;
+		this.assets = assets;
+		this.headingShift = headingShift;
+	}
 
 	private run(text: string, fmt: Fmt): TextRun {
 		return new TextRun({
@@ -113,12 +131,13 @@ class Builder {
 		return new ImageRun({ type: info.kind, data: bytes, transformation: { width: w, height: h } });
 	}
 
-	private footnoteRef(id: string): ParagraphChild {
+	private footnoteRef(rawId: string): ParagraphChild {
+		const id = `${this.noteIndex}:${rawId}`;
 		let n = this.footnoteNumbers.get(id);
 		if (n === undefined) {
 			n = this.footnoteNumbers.size + 1;
 			this.footnoteNumbers.set(id, n);
-			const text = this.prepared.footnotes.get(id) ?? "";
+			const text = this.prepared.footnotes.get(rawId) ?? "";
 			this.footnoteBodies[String(n)] = { children: [new Paragraph({ children: this.textRuns(text, {}) })] };
 		}
 		return new FootnoteReferenceRun(n);
@@ -246,7 +265,7 @@ class Builder {
 		for (const t of tokens) {
 			switch (t.type) {
 				case "heading": {
-					const depth = Math.min(Math.max(Number(t.depth), 1), 6);
+					const depth = Math.min(Math.max(Number(t.depth), 1) + this.headingShift, 6);
 					out.push(new Paragraph({ heading: HEADINGS[depth - 1], children: await this.inline(t.tokens) }));
 					break;
 				}
@@ -314,10 +333,25 @@ class Builder {
 		};
 	}
 
-	async build(): Promise<ArrayBuffer> {
+	async build(notes?: ManuscriptNote[]): Promise<ArrayBuffer> {
 		const children: Block[] = [];
 		if (this.opts.title) children.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(this.opts.title)] }));
-		children.push(...(await this.blocks(lex(this.prepared.body))));
+		if (notes) {
+			// Chapter title is Heading 1 and the note's own headings move down one level.
+			for (const [i, note] of notes.entries()) {
+				this.useNote(i, note.prepared, note.assets, 1);
+				children.push(
+					new Paragraph({
+						heading: HeadingLevel.HEADING_1,
+						pageBreakBefore: i > 0 || Boolean(this.opts.title),
+						children: [new TextRun(note.title)],
+					}),
+				);
+				children.push(...(await this.blocks(lex(note.prepared.body))));
+			}
+		} else {
+			children.push(...(await this.blocks(lex(this.prepared.body))));
+		}
 
 		const doc = new Document({
 			creator: "",
@@ -361,4 +395,11 @@ class Builder {
 
 export function buildDocx(prepared: Prepared, opts: BuildOptions, assets: Assets): Promise<ArrayBuffer> {
 	return new Builder(prepared, opts, assets).build();
+}
+
+/** Joins several notes, in the given order, into one document with the same styles and page setup as a single export. */
+export function buildManuscript(notes: ManuscriptNote[], opts: BuildOptions): Promise<ArrayBuffer> {
+	const first = notes[0];
+	if (!first) return Promise.reject(new Error("No notes to compile."));
+	return new Builder(first.prepared, opts, first.assets).build(notes);
 }

@@ -1,6 +1,8 @@
 import { Menu, Notice, Plugin, TAbstractFile, TFile, TFolder, normalizePath } from "obsidian";
 import JSZip from "jszip";
-import { buildDocx } from "./docx-builder";
+import { buildDocx, buildManuscript, ManuscriptNote } from "./docx-builder";
+import { collectNotes } from "./compile";
+import { FolderModal } from "./folder-modal";
 import { prepare } from "./markdown";
 import { cacheGrantsPro, verifyWithGumroad } from "./license";
 import { ACTIVATION_LIMIT, proIsOnSale } from "./product";
@@ -29,8 +31,28 @@ export default class DocxStylerPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "compile-folder",
+			name: "Compile a folder into one Word file (Pro)",
+			callback: () => {
+				if (!this.requirePro()) return;
+				new FolderModal(this.app, (folder) => void this.exportFolder(folder)).open();
+			},
+		});
+
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
+				if (file instanceof TFolder) {
+					menu.addItem((item) =>
+						item
+							.setTitle("Compile to one Word file (.docx)")
+							.setIcon("file-output")
+							.onClick(() => {
+								if (this.requirePro()) void this.exportFolder(file);
+							}),
+					);
+					return;
+				}
 				if (!(file instanceof TFile) || file.extension !== "md") return;
 				menu.addItem((item) =>
 					item
@@ -97,6 +119,61 @@ export default class DocxStylerPlugin extends Plugin {
 		return (await zip.file("word/styles.xml")?.async("string")) ?? null;
 	}
 
+	private requirePro(): boolean {
+		if (this.proActive()) return true;
+		new Notice("Compiling a folder is a Pro feature. Exporting a single note stays free.");
+		return false;
+	}
+
+	private assetsFor(file: TFile) {
+		return {
+			load: async (target: string) => {
+				const dest = this.app.metadataCache.getFirstLinkpathDest(target, file.path);
+				return dest ? new Uint8Array(await this.app.vault.readBinary(dest)) : null;
+			},
+		};
+	}
+
+	/** Pro. Joins every note in the folder (natural path order) into one .docx with the same template and page number settings as a single export. */
+	async exportFolder(folder: TFolder): Promise<void> {
+		if (!this.requirePro()) return;
+		const files = collectNotes(folder);
+		if (files.length === 0) {
+			new Notice("This folder has no notes to compile.");
+			return;
+		}
+		const notice = new Notice(`Compiling ${files.length} notes to Word...`, 0);
+		try {
+			const s = this.settings;
+			const notes: ManuscriptNote[] = [];
+			for (const file of files) {
+				notes.push({
+					title: file.basename,
+					prepared: prepare(await this.app.vault.cachedRead(file), s.stripFrontmatter),
+					assets: this.assetsFor(file),
+				});
+			}
+			const name = folder.isRoot() ? this.app.vault.getName() : folder.name;
+			const data = await buildManuscript(notes, {
+				title: s.includeTitle ? name : null,
+				fontFamily: s.fontFamily,
+				fontSize: s.fontSize,
+				pageSize: s.pageSize,
+				templateStylesXml: await this.templateStyles(),
+				pageNumbers: s.pageNumbers,
+			});
+			const outPath = await this.outputPathFor(name, folder.parent?.path ?? "");
+			const existing = this.app.vault.getAbstractFileByPath(outPath);
+			if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, data);
+			else await this.app.vault.createBinary(outPath, data);
+			new Notice(`Saved ${outPath} (${files.length} notes)`);
+		} catch (e) {
+			new Notice(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			notice.hide();
+		}
+	}
+
 	async exportFile(file: TFile): Promise<void> {
 		const notice = new Notice("Exporting to Word...", 0);
 		try {
@@ -135,11 +212,15 @@ export default class DocxStylerPlugin extends Plugin {
 		}
 	}
 
-	private async outputPath(file: TFile): Promise<string> {
-		const folder = this.settings.outputFolder ? normalizePath(this.settings.outputFolder) : (file.parent?.path ?? "");
+	private outputPath(file: TFile): Promise<string> {
+		return this.outputPathFor(file.basename, file.parent?.path ?? "");
+	}
+
+	private async outputPathFor(basename: string, defaultFolder: string): Promise<string> {
+		const folder = this.settings.outputFolder ? normalizePath(this.settings.outputFolder) : defaultFolder;
 		if (folder && folder !== "/" && !(this.app.vault.getAbstractFileByPath(folder) instanceof TFolder)) {
 			await this.app.vault.createFolder(folder);
 		}
-		return normalizePath(`${folder && folder !== "/" ? folder + "/" : ""}${file.basename}.docx`);
+		return normalizePath(`${folder && folder !== "/" ? folder + "/" : ""}${basename}.docx`);
 	}
 }
