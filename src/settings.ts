@@ -17,6 +17,12 @@ export interface DocxStylerSettings {
 	license: LicenseCache | null;
 	templatePath: string;
 	pageNumbers: boolean;
+	coverPage: boolean;
+	coverSubtitle: string;
+	coverAuthor: string;
+	tableOfContents: boolean;
+	tocLevels: number;
+	tocTitle: string;
 }
 
 export const DEFAULT_SETTINGS: DocxStylerSettings = {
@@ -30,7 +36,16 @@ export const DEFAULT_SETTINGS: DocxStylerSettings = {
 	license: null,
 	templatePath: "",
 	pageNumbers: false,
+	coverPage: false,
+	coverSubtitle: "",
+	coverAuthor: "",
+	tableOfContents: false,
+	tocLevels: 3,
+	tocTitle: "Contents",
 };
+
+/** Deepest heading level a table of contents can list. */
+export const MAX_TOC_LEVELS = 6;
 
 /**
  * Builds settings from saved data. Unknown or old fields are dropped and a
@@ -57,7 +72,15 @@ export function cleanSetting(key: EditableKey, value: unknown): DocxStylerSettin
 		case "includeTitle":
 		case "stripFrontmatter":
 		case "pageNumbers":
+		case "coverPage":
+		case "tableOfContents":
 			return value === true;
+		case "tocLevels": {
+			const n = Number(value);
+			return Number.isFinite(n) ? Math.min(MAX_TOC_LEVELS, Math.max(1, Math.round(n))) : DEFAULT_SETTINGS.tocLevels;
+		}
+		case "tocTitle":
+			return (typeof value === "string" ? value.trim() : "") || DEFAULT_SETTINGS.tocTitle;
 		case "fontSize": {
 			const n = Number(value);
 			return Number.isFinite(n) ? Math.min(16, Math.max(8, Math.round(n))) : DEFAULT_SETTINGS.fontSize;
@@ -81,6 +104,12 @@ const TEXT = {
 	licenseKey: ["License key", "Only the activate and check license buttons send the key to Gumroad's license API. Nothing else is sent, and nothing is sent on its own."],
 	templatePath: ["Word template", "Pro. A .docx file in your vault whose styles are used for every export."],
 	pageNumbers: ["Page numbers", "Pro. Add a page number footer."],
+	coverPage: ["Cover page", "Pro. Start with a cover page (title, subtitle, author) and a page break. A note's title, subtitle and author properties override the text. A docx-cover property of true or false turns it on or off for one note."],
+	coverSubtitle: ["Cover subtitle", "Pro. Used when the note has no subtitle property. Leave empty for none."],
+	coverAuthor: ["Cover author", "Pro. Used when the note has no author property. Leave empty for none."],
+	tableOfContents: ["Table of contents", "Pro. Add a Word table of contents built from the heading styles. Word refreshes it when the file opens. A docx-toc property of true or false turns it on or off for one note."],
+	tocLevels: ["Table of contents levels", "Pro. Heading levels listed in the table of contents."],
+	tocTitle: ["Table of contents title", "Pro. Shown above the table in the TOC Heading style."],
 } as const;
 
 export class DocxStylerSettingTab extends PluginSettingTab {
@@ -121,6 +150,12 @@ export class DocxStylerSettingTab extends PluginSettingTab {
 						control: { type: "file", key: "templatePath", placeholder: "Templates/House style.docx", filter: (f: TFile) => f.extension === "docx" },
 					},
 					{ name: TEXT.pageNumbers[0], desc: TEXT.pageNumbers[1], control: { type: "toggle", key: "pageNumbers" } },
+					{ name: TEXT.coverPage[0], desc: TEXT.coverPage[1], control: { type: "toggle", key: "coverPage" } },
+					{ name: TEXT.coverSubtitle[0], desc: TEXT.coverSubtitle[1], control: { type: "text", key: "coverSubtitle", placeholder: "A short subtitle" } },
+					{ name: TEXT.coverAuthor[0], desc: TEXT.coverAuthor[1], control: { type: "text", key: "coverAuthor", placeholder: "Your name" } },
+					{ name: TEXT.tableOfContents[0], desc: TEXT.tableOfContents[1], control: { type: "toggle", key: "tableOfContents" } },
+					{ name: TEXT.tocLevels[0], desc: TEXT.tocLevels[1], control: { type: "slider", key: "tocLevels", min: 1, max: MAX_TOC_LEVELS, step: 1 } },
+					{ name: TEXT.tocTitle[0], desc: TEXT.tocTitle[1], control: { type: "text", key: "tocTitle", placeholder: DEFAULT_SETTINGS.tocTitle } },
 				],
 			},
 		];
@@ -201,5 +236,11 @@ export class DocxStylerSettingTab extends PluginSettingTab {
 			t.setPlaceholder("Templates/House style.docx").setValue(s.templatePath).onChange(save("templatePath")),
 		);
 		row("pageNumbers").addToggle((t) => t.setValue(s.pageNumbers).onChange(save("pageNumbers")));
+		row("coverPage").addToggle((t) => t.setValue(s.coverPage).onChange(save("coverPage")));
+		row("coverSubtitle").addText((t) => t.setPlaceholder("A short subtitle").setValue(s.coverSubtitle).onChange(save("coverSubtitle")));
+		row("coverAuthor").addText((t) => t.setPlaceholder("Your name").setValue(s.coverAuthor).onChange(save("coverAuthor")));
+		row("tableOfContents").addToggle((t) => t.setValue(s.tableOfContents).onChange(save("tableOfContents")));
+		row("tocLevels").addSlider((sl) => sl.setLimits(1, MAX_TOC_LEVELS, 1).setValue(s.tocLevels).onChange(save("tocLevels")));
+		row("tocTitle").addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.tocTitle).setValue(s.tocTitle).onChange(save("tocTitle")));
 	}
 }

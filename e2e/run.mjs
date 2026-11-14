@@ -219,14 +219,14 @@ async function main() {
 			const hasBuy = [...(app.setting.modalEl ?? document.body).querySelectorAll("button")].some((b) => b.textContent === "Buy Pro (19 USD)");
 			app.setting.close();
 			return {
-				hasRows: ["Output folder", "Font size", "Page size", "License key", "Word template", "Page numbers"].every((s) => text.includes(s)),
+				hasRows: ["Output folder", "Font size", "Page size", "License key", "Word template", "Page numbers", "Cover page", "Table of contents"].every((s) => text.includes(s)),
 				hasPro: text.includes("Pro"),
 				hasBuy,
 				defs: defs.length,
 				items: defs.reduce((n, g) => n + (g.items?.length ?? 0), 0),
 			};
 		}, PLUGIN_ID);
-		check("Settings tab renders (declarative API)", settings.hasRows && settings.hasPro && settings.hasBuy && settings.items === 10, JSON.stringify(settings));
+		check("Settings tab renders (declarative API)", settings.hasRows && settings.hasPro && settings.hasBuy && settings.items === 16, JSON.stringify(settings));
 
 		// Setting change through setControlValue persists to data.json
 		await page.evaluate(async (id) => {
@@ -292,6 +292,27 @@ async function main() {
 		const gatedNotice = await page.evaluate(() => [...document.querySelectorAll(".notice")].some((n) => n.textContent.includes("Pro features")));
 		const footer = file ? spawnSync("unzip", ["-p", file, "word/footer1.xml"], { encoding: "utf8" }).stdout : "";
 		check("Page numbers stay off without Pro and a notice explains it", file && gatedNotice && !footer.includes("PAGE"));
+		// Cover page and table of contents are Pro too: without Pro the export is the free one, with a notice.
+		await waitNoticesGone(page);
+		await page.evaluate(async (id) => {
+			const tab = app.setting.pluginTabs.find((t) => t.id === id);
+			await tab.setControlValue("pageNumbers", false);
+			await tab.setControlValue("coverPage", true);
+			await tab.setControlValue("tableOfContents", true);
+		}, PLUGIN_ID);
+		t0 = Date.now();
+		await page.evaluate((id) => app.commands.executeCommandById(`${id}:export-current-note`), PLUGIN_ID);
+		file = await waitForFile(OUT, t0);
+		const frontNotice = await page.evaluate(() => [...document.querySelectorAll(".notice")].some((n) => n.textContent.includes("cover page and table of contents are Pro features")));
+		const gatedDoc = file ? spawnSync("unzip", ["-p", file, "word/document.xml"], { encoding: "utf8" }).stdout : "";
+		const gatedSettings = file ? spawnSync("unzip", ["-p", file, "word/settings.xml"], { encoding: "utf8" }).stdout : "";
+		check("Cover page and table of contents stay off without Pro and a notice explains it", file && frontNotice && !gatedDoc.includes("<w:sdt>") && !gatedDoc.includes('w:val="Subtitle"') && !gatedSettings.includes("updateFields"));
+		if (file) verifyDocx(file, "free-with-front-settings");
+		await page.evaluate(async (id) => {
+			const tab = app.setting.pluginTabs.find((t) => t.id === id);
+			await tab.setControlValue("coverPage", false);
+			await tab.setControlValue("tableOfContents", false);
+		}, PLUGIN_ID);
 		// 4. Folder compile (Pro). Gated first, then unlocked the way a verified key would, without the network.
 		await page.evaluate(async (id) => {
 			const tab = app.setting.pluginTabs.find((t) => t.id === id);
@@ -358,11 +379,62 @@ async function main() {
 		check("Folder menu item writes the compiled file", file, compiled);
 		if (file) fs.copyFileSync(file, path.join(RESULTS, "folder-menu.docx"));
 		await waitNoticesGone(page);
+
+		// 5. Cover page and table of contents (Pro): single note and compiled folder, with and without a template.
+		spawnSync("python3", [path.join(REPO, "e2e", "make_template.py"), path.join(VAULT, "Templates", "House style.docx"), path.join(VAULT, "Templates", "Cover style.docx")]);
+		const frontCases = [
+			{ label: "front-note-plain", kind: "note", template: "", want: { title: "Sample", subtitle: "A test subtitle", author: "Settings Author", entries: ["Report title", "Section two", "Section three"], body_marker: "Intro with" } },
+			{ label: "front-note-template", kind: "note", template: "Templates/Cover style.docx", want: { title: "Sample", subtitle: "A test subtitle", author: "Settings Author", entries: ["Report title", "Section two", "Section three"], body_marker: "Intro with", template_color: "8B0000" } },
+			{ label: "front-folder-plain", kind: "folder", folder: "Book", template: "", want: { title: "Book", subtitle: "A test subtitle", author: "Settings Author", entries: ["Chapter 1", "Opening inner heading", "Chapter 2", "Deeper heading two", "Chapter 10", "Appendix"], body_marker: "First chapter text" } },
+			{ label: "front-folder-template", kind: "folder", folder: "Book", template: "Templates/Cover style.docx", want: { title: "Book", subtitle: "A test subtitle", author: "Settings Author", entries: ["Chapter 1", "Opening inner heading", "Chapter 2", "Deeper heading two", "Chapter 10", "Appendix"], body_marker: "First chapter text", template_color: "8B0000" } },
+			{ label: "front-folder-note-properties", kind: "folder", folder: "Essays", template: "", want: { title: "Collected Essays", subtitle: "Notes from one year", author: "Fern Writer", entries: ["Essays", "About these essays", "On walking", "Why walk", "Short routes"], body_marker: "A folder note with the cover text" } },
+		];
+		for (const c of frontCases) {
+			await page.evaluate(
+				async ({ id, template }) => {
+					const plugin = app.plugins.plugins[id];
+					Object.assign(plugin.settings, { templatePath: template, pageNumbers: true, coverPage: true, coverSubtitle: "A test subtitle", coverAuthor: "Settings Author", tableOfContents: true, tocLevels: 3, tocTitle: "Contents" });
+					await plugin.saveSettings();
+					await app.workspace.getLeaf(false).openFile(app.vault.getFileByPath("Sample.md"));
+				},
+				{ id: PLUGIN_ID, template: c.template },
+			);
+			const rel = c.kind === "note" ? OUT : `Exports/${c.folder}.docx`;
+			fs.rmSync(path.join(VAULT, rel), { force: true });
+			await sleep(300);
+			t0 = Date.now();
+			if (c.kind === "note") await page.evaluate((id) => app.commands.executeCommandById(`${id}:export-current-note`), PLUGIN_ID);
+			else await page.evaluate(({ id, folder }) => app.plugins.plugins[id].exportFolder(app.vault.getFolderByPath(folder)), { id: PLUGIN_ID, folder: c.folder });
+			file = await waitForFile(rel, t0);
+			check(`${c.label}: export writes the file`, file, rel);
+			if (!file) continue;
+			const keep = path.join(RESULTS, `${c.label}.docx`);
+			fs.copyFileSync(file, keep);
+			const lo = spawnSync("soffice", ["--headless", `-env:UserInstallation=file://${path.join(RUN, "lo-profile")}`, "--convert-to", "pdf", "--outdir", RESULTS, keep], { encoding: "utf8", timeout: 120000 });
+			const pdf = keep.replace(/\.docx$/, ".pdf");
+			check(`${c.label}: LibreOffice converts it to PDF`, lo.status === 0 && fs.existsSync(pdf));
+			const py = spawnSync("python3", [path.join(REPO, "e2e", "verify_front.py"), keep, pdf, JSON.stringify(c.want)], { encoding: "utf8" });
+			let parsed = null;
+			try {
+				parsed = JSON.parse(py.stdout);
+			} catch {
+				/* reported below */
+			}
+			const bad = parsed ? Object.entries(parsed.checks).filter(([, v]) => !v).map(([k]) => k) : ["unparsable"];
+			check(`${c.label}: cover on page 1, table of contents on page 2, body from page 3`, py.status === 0, bad.length ? `failed: ${bad.join(", ")} ${py.stdout} ${py.stderr}` : `${Object.keys(parsed.checks).length} checks, ${parsed.pages} pages`);
+			fs.writeFileSync(path.join(RESULTS, `${c.label}.json`), py.stdout);
+			if (c.kind === "note") verifyDocx(file, `${c.label}-body`);
+			const footerXml = spawnSync("unzip", ["-p", keep, "word/footer1.xml"], { encoding: "utf8" }).stdout;
+			check(`${c.label}: page numbers still on`, footerXml.includes("PAGE"));
+		}
+		await waitNoticesGone(page);
 		await page.evaluate(async (id) => {
 			const plugin = app.plugins.plugins[id];
 			plugin.settings.license = null;
 			plugin.settings.templatePath = "";
 			plugin.settings.pageNumbers = false;
+			plugin.settings.coverPage = false;
+			plugin.settings.tableOfContents = false;
 			await plugin.saveSettings();
 			const t = app.vault.getFolderByPath("Templates");
 			if (t) await app.vault.delete(t, true);

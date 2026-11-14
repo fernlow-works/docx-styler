@@ -47,3 +47,27 @@ describe("migrateSettings", () => {
 		expect(s.license).toEqual({ status: "active", uses: 1, checkedAt: 9 });
 	});
 });
+
+describe("cover page and table of contents settings", () => {
+	it("are off by default with levels 1 to 3 and the title Contents", () => {
+		expect(DEFAULT_SETTINGS.coverPage).toBe(false);
+		expect(DEFAULT_SETTINGS.tableOfContents).toBe(false);
+		expect(DEFAULT_SETTINGS.tocLevels).toBe(3);
+		expect(DEFAULT_SETTINGS.tocTitle).toBe("Contents");
+	});
+	it("clamp the levels to 1 to 6 and fall back to Contents for an empty title", () => {
+		expect(cleanSetting("tocLevels", 0)).toBe(1);
+		expect(cleanSetting("tocLevels", 9)).toBe(6);
+		expect(cleanSetting("tocLevels", "x")).toBe(3);
+		expect(cleanSetting("tocTitle", "  ")).toBe("Contents");
+		expect(cleanSetting("coverPage", "yes")).toBe(false);
+		expect(cleanSetting("coverAuthor", "  Jane  ")).toBe("Jane");
+	});
+	it("load from 1.2.0 data with the new settings off", () => {
+		const s = migrateSettings({ outputFolder: "Exports", pageNumbers: true, templatePath: "T.docx" });
+		expect(s.coverPage).toBe(false);
+		expect(s.tableOfContents).toBe(false);
+		expect(s.pageNumbers).toBe(true);
+		expect(s.templatePath).toBe("T.docx");
+	});
+});

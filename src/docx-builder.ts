@@ -10,10 +10,12 @@ import {
 	ImageRun,
 	LevelFormat,
 	Packer,
+	PageBreak,
 	PageNumber,
 	Paragraph,
 	ParagraphChild,
 	Table,
+	TableOfContents,
 	TableCell,
 	TableRow,
 	TextRun,
@@ -23,6 +25,7 @@ import type { Tokens } from "marked";
 import { calloutHeader, lex, Prepared } from "./markdown";
 import { readImageInfo } from "./image-size";
 import type { PageSize } from "./settings";
+import type { CoverOptions, TocOptions } from "./front-matter";
 
 export interface BuildOptions {
 	title: string | null;
@@ -33,6 +36,10 @@ export interface BuildOptions {
 	templateStylesXml: string | null;
 	/** Page number footer (Pro). */
 	pageNumbers: boolean;
+	/** Cover page before everything else (Pro). Replaces the plain title. */
+	cover?: CoverOptions | null;
+	/** Word table of contents field built from the heading styles (Pro). */
+	toc?: TocOptions | null;
 }
 
 export interface Assets {
@@ -41,6 +48,8 @@ export interface Assets {
 }
 
 type Block = Paragraph | Table;
+/** Body blocks plus the table of contents, which only the front matter has. */
+type DocBlock = Block | TableOfContents;
 interface Fmt {
 	bold?: boolean;
 	italics?: boolean;
@@ -59,6 +68,8 @@ const HEADINGS = [
 ] as const;
 const NUMBERING_REF = "docx-styler-numbers";
 const MAX_IMAGE_WIDTH_PX = 600;
+/** Style ids the front matter uses. Word knows Title, Subtitle, TOC Heading and TOC 1 to 9 as built-in styles. */
+export const FRONT_STYLES = { title: "Title", subtitle: "Subtitle", author: "DocxStylerCoverAuthor", tocHeading: "TOCHeading" } as const;
 const PAGE = { A4: { width: 11906, height: 16838 }, Letter: { width: 12240, height: 15840 } };
 
 function decodeEntities(s: string): string {
@@ -84,6 +95,8 @@ class Builder {
 	private footnoteNumbers = new Map<string, number>();
 	private footnoteBodies: Record<string, { children: Paragraph[] }> = {};
 	private listInstance = 0;
+	/** Depth of every heading written, so the table of contents knows if it will have entries. */
+	private headingDepths: number[] = [];
 
 	constructor(
 		private prepared: Prepared,
@@ -266,6 +279,7 @@ class Builder {
 			switch (t.type) {
 				case "heading": {
 					const depth = Math.min(Math.max(Number(t.depth), 1) + this.headingShift, 6);
+					this.headingDepths.push(depth);
 					out.push(new Paragraph({ heading: HEADINGS[depth - 1], children: await this.inline(t.tokens) }));
 					break;
 				}
@@ -322,6 +336,7 @@ class Builder {
 				run: { font: "Consolas", size: 18 },
 				paragraph: { spacing: { before: 0, after: 0 }, shading: { type: "clear", fill: "F2F2F2", color: "auto" } },
 			},
+			...this.frontStyles(),
 		].filter((s) => !has(s.id)) as IParagraphStyleOptions[];
 		const characterStyles: ICharacterStyleOptions[] = [
 			{ id: "DocxStylerInlineCode", name: "Inline code", basedOn: "DefaultParagraphFont", run: { font: "Consolas", shading: { type: "clear", fill: "F2F2F2", color: "auto" } } },
@@ -333,29 +348,89 @@ class Builder {
 		};
 	}
 
+	/**
+	 * Fallback styles for the front matter, added only when it is used and only when the template (or the default
+	 * styles) do not already define them, so a buyer's template styles the cover and the table of contents.
+	 */
+	private frontStyles(): IParagraphStyleOptions[] {
+		const out: IParagraphStyleOptions[] = [];
+		if (this.opts.cover) {
+			out.push(
+				{ id: FRONT_STYLES.subtitle, name: "Subtitle", basedOn: "Normal", next: "Normal", run: { color: "5A5A5A", size: 28 }, paragraph: { spacing: { after: 240 } } },
+				{ id: FRONT_STYLES.author, name: "Cover author", basedOn: FRONT_STYLES.subtitle, next: "Normal", run: { size: 24, color: "404040" } },
+			);
+		}
+		if (this.opts.toc) {
+			// Outline level 9 (written as 9, "body text") keeps the TOC title itself out of the table, as in Word.
+			// TOC 1 to 9 come with the default styles and give way to a template's own.
+			out.push({ id: FRONT_STYLES.tocHeading, name: "TOC Heading", basedOn: "Heading1", next: "Normal", paragraph: { outlineLevel: 9 } });
+		}
+		return out;
+	}
+
+	/** Cover page paragraphs: title, then subtitle and author when set. */
+	private coverBlocks(cover: CoverOptions): Paragraph[] {
+		const out = [new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(cover.title)] })];
+		if (cover.subtitle) out.push(new Paragraph({ style: FRONT_STYLES.subtitle, children: [new TextRun(cover.subtitle)] }));
+		if (cover.author) out.push(new Paragraph({ style: FRONT_STYLES.author, children: [new TextRun(cover.author)] }));
+		return out;
+	}
+
+	/**
+	 * A real Word TOC field over the heading styles. Its cached result lists the document's headings (linked to
+	 * bookmarks on them) so it is not empty before Word updates it, and updateFields in settings.xml makes Word
+	 * refresh it, page numbers included, when the file opens.
+	 */
+	private tocBlocks(toc: TocOptions, afterCover: boolean): DocBlock[] {
+		const listed = this.headingDepths.some((d) => d <= toc.levels);
+		return [
+			new Paragraph({ style: FRONT_STYLES.tocHeading, pageBreakBefore: afterCover, children: [new TextRun(toc.title)] }),
+			new TableOfContents(toc.title, {
+				hyperlink: true,
+				headingStyleRange: `1-${toc.levels}`,
+				hideTabAndPageNumbersInWebView: true,
+				useAppliedParagraphOutlineLevel: true,
+				// With no headings in range, a short hint stands in until headings are added and Word updates the table.
+				...(listed ? {} : { contentChildren: [new Paragraph({ children: [new TextRun("No headings yet. Add headings, then update this table in Word.")] })] }),
+			}),
+		];
+	}
+
 	async build(notes?: ManuscriptNote[]): Promise<ArrayBuffer> {
-		const children: Block[] = [];
-		if (this.opts.title) children.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(this.opts.title)] }));
+		const { cover = null, toc = null } = this.opts;
+		const body: Block[] = [];
 		if (notes) {
 			// Chapter title is Heading 1 and the note's own headings move down one level.
+			const startsOnNewPage = Boolean(this.opts.title) || cover !== null || toc !== null;
 			for (const [i, note] of notes.entries()) {
 				this.useNote(i, note.prepared, note.assets, 1);
-				children.push(
+				this.headingDepths.push(1);
+				body.push(
 					new Paragraph({
 						heading: HeadingLevel.HEADING_1,
-						pageBreakBefore: i > 0 || Boolean(this.opts.title),
+						pageBreakBefore: i > 0 || startsOnNewPage,
 						children: [new TextRun(note.title)],
 					}),
 				);
-				children.push(...(await this.blocks(lex(note.prepared.body))));
+				body.push(...(await this.blocks(lex(note.prepared.body))));
 			}
 		} else {
-			children.push(...(await this.blocks(lex(this.prepared.body))));
+			body.push(...(await this.blocks(lex(this.prepared.body))));
 		}
+
+		// Front matter goes before the body. It is built after it so the table of contents knows the headings.
+		const children: DocBlock[] = [];
+		if (cover) children.push(...this.coverBlocks(cover));
+		else if (this.opts.title) children.push(new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(this.opts.title)] }));
+		if (toc) children.push(...this.tocBlocks(toc, cover !== null));
+		// A compiled folder's first chapter already starts on a new page.
+		if (!notes && (cover || toc)) children.push(new Paragraph({ children: [new PageBreak()] }));
+		children.push(...body);
 
 		const doc = new Document({
 			creator: "",
-			title: this.opts.title ?? "",
+			title: cover?.title ?? this.opts.title ?? "",
+			...(toc ? { features: { updateFields: true } } : {}),
 			...(this.opts.templateStylesXml ? { externalStyles: this.opts.templateStylesXml } : {}),
 			styles: this.styles(),
 			footnotes: this.footnoteBodies,

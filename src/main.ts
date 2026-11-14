@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import { buildDocx, buildManuscript, ManuscriptNote } from "./docx-builder";
 import { collectNotes } from "./compile";
 import { FolderModal } from "./folder-modal";
+import { resolveFrontMatter, wantsFrontMatter } from "./front-matter";
 import { prepare } from "./markdown";
 import { cacheGrantsPro, verifyWithGumroad } from "./license";
 import { ACTIVATION_LIMIT, proIsOnSale } from "./product";
@@ -119,6 +120,11 @@ export default class DocxStylerPlugin extends Plugin {
 		return (await zip.file("word/styles.xml")?.async("string")) ?? null;
 	}
 
+	/** The note's properties as Obsidian parsed them, or null. */
+	private properties(file: TFile): Record<string, unknown> | null {
+		return this.app.metadataCache.getFileCache(file)?.frontmatter ?? null;
+	}
+
 	private requirePro(): boolean {
 		if (this.proActive()) return true;
 		new Notice("Compiling a folder is a Pro feature. Exporting a single note stays free.");
@@ -154,6 +160,9 @@ export default class DocxStylerPlugin extends Plugin {
 				});
 			}
 			const name = folder.isRoot() ? this.app.vault.getName() : folder.name;
+			// A folder note (a note named like its folder, directly inside it) can set the cover text.
+			const folderNote = folder.children.find((c): c is TFile => c instanceof TFile && c.extension === "md" && c.basename === folder.name);
+			const front = resolveFrontMatter(name, folderNote ? this.properties(folderNote) : null, s);
 			const data = await buildManuscript(notes, {
 				title: s.includeTitle ? name : null,
 				fontFamily: s.fontFamily,
@@ -161,6 +170,8 @@ export default class DocxStylerPlugin extends Plugin {
 				pageSize: s.pageSize,
 				templateStylesXml: await this.templateStyles(),
 				pageNumbers: s.pageNumbers,
+				cover: front.cover,
+				toc: front.toc,
 			});
 			const outPath = await this.outputPathFor(name, folder.parent?.path ?? "");
 			const existing = this.app.vault.getAbstractFileByPath(outPath);
@@ -178,9 +189,10 @@ export default class DocxStylerPlugin extends Plugin {
 		const notice = new Notice("Exporting to Word...", 0);
 		try {
 			const s = this.settings;
-			const wantsPro = Boolean(s.templatePath) || s.pageNumbers;
+			const front = resolveFrontMatter(file.basename, this.properties(file), s);
+			const wantsPro = Boolean(s.templatePath) || s.pageNumbers || wantsFrontMatter(front);
 			const pro = wantsPro && this.proActive();
-			if (wantsPro && !pro) new Notice("Word template and page numbers are Pro features. Exporting without them.");
+			if (wantsPro && !pro) new Notice("Word template, page numbers, cover page and table of contents are Pro features. Exporting without them.");
 
 			const prepared = prepare(await this.app.vault.cachedRead(file), s.stripFrontmatter);
 			const data = await buildDocx(
@@ -192,6 +204,8 @@ export default class DocxStylerPlugin extends Plugin {
 					pageSize: s.pageSize,
 					templateStylesXml: pro ? await this.templateStyles() : null,
 					pageNumbers: pro && s.pageNumbers,
+					cover: pro ? front.cover : null,
+					toc: pro ? front.toc : null,
 				},
 				{
 					load: async (target) => {
